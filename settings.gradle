@@ -1,0 +1,33 @@
+pluginManagement {
+	repositories {
+		maven {
+			name = 'Fabric'
+			url = 'https://maven.fabricmc.net/'
+		}
+		mavenCentral()
+		gradlePluginPortal()
+	}
+}
+
+plugins {
+	id 'org.gradle.toolchains.foojay-resolver-convention' version '1.0.0'
+}
+
+rootProject.name = 'Tellus'
+
+// ---------------------------------------------------------------------------
+// 1.21.9 分支：本仓库原来的 mc1201 / mc1211 / mc261 三个目标暂时不参与配置。
+// 原因：它们各自锁定了不同版本的 Loom（其中 mc1211 用的是 1.14-SNAPSHOT），
+// 一起配置会让根工程在解析插件时把不相关的目标也拉起来，构建 1.21.9 时会
+// 因为它们的依赖/插件不可达而整体失败。需要哪个目标就把它放回来。
+// ---------------------------------------------------------------------------
+include('mc1219')
+// include('mc1201')
+// include('mc1211')
+// include('mc261')
+
+dependencyResolutionManagement {
+	repositories {
+		mavenCentral()
+	}
+}

@@ -1,0 +1,36 @@
+{
+  "required": true,
+  "package": "com.yucareux.tellus.mixin",
+  "compatibilityLevel": "JAVA_21",
+  "mixins": [
+    "BiomeFreezeMixin",
+    "BiomePrecipitationMixin",
+    "OceanMonumentBuildingMixin",
+    "OceanMonumentStructureMixin",
+    "DimensionTypeHeightMixin",
+    "DimensionTypeMaxYMixin",
+    "BlockPosLayoutMixin",
+    "DimensionTypeMinYMixin",
+    "ChunkAccessSparseSectionsMixin",
+    "LevelChunkSparseSectionsMixin",
+    "ProtoChunkSparseSectionsMixin",
+    "LevelChunkSectionSparseGuardMixin",
+    "SerializableChunkDataSparseMixin",
+    "SerializableChunkDataPostProcessGuardMixin",
+    "LevelChunkSparseClientMixin",
+    "BulkSectionAccessSparseMixin",
+    "ChunkPacketCapMixin",
+    "HighestSectionHintMixin",
+    "CarvingMaskCapacityMixin",
+    "VoxyMapperGuardMixin",
+    "voxy.VoxyServerTickMixin",
+    "LightMissingLayerGuardMixin",
+    "LightMissingLayerGuard2Mixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  },
+  "overwrites": {
+    "requireAnnotations": true
+  }
+}

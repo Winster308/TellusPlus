@@ -1,0 +1,48 @@
+plugins {
+	id 'base'
+}
+
+group = project.maven_group
+version = project.mod_version + "-Tellus" + project.tellus_version
+
+subprojects {
+	group = rootProject.group
+	version = rootProject.version
+}
+
+// ---------------------------------------------------------------------------
+// 当前只构建 1.21.9 目标（mc1219）。其余目标见 settings.gradle 的说明。
+// ---------------------------------------------------------------------------
+tasks.named('clean') {
+	dependsOn(':mc1219:clean')
+}
+
+tasks.named('assemble') {
+	dependsOn(':mc1219:assemble')
+}
+
+tasks.named('check') {
+	dependsOn(':mc1219:check')
+}
+
+tasks.named('build') {
+	dependsOn(':mc1219:build')
+}
+
+tasks.register('build1219') {
+	group = 'build'
+	description = 'Builds the Minecraft 1.21.9 Fabric target.'
+	dependsOn(':mc1219:build')
+}
+
+tasks.register('runClient1219') {
+	group = 'fabric'
+	description = 'Runs the Minecraft 1.21.9 client target.'
+	dependsOn(':mc1219:runClient')
+}
+
+tasks.register('runServer1219') {
+	group = 'fabric'
+	description = 'Runs the Minecraft 1.21.9 server target.'
+	dependsOn(':mc1219:runServer')
+}
