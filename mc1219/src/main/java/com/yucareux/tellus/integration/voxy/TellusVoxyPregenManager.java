@@ -194,7 +194,79 @@ public final class TellusVoxyPregenManager {
 
    public int effectiveMaxRadius(EarthGeneratorSettings settings) {
       Integer override = this.maxRadiusOverride;
-      return Math.max(0, override != null ? override : settings.voxyChunkPregenMaxRadius());
+      int configured = Math.max(0, override != null ? override : settings.voxyChunkPregenMaxRadius());
+      return Math.min(configured, VRAM_AWARE_RADIUS_CAP);
+   }
+
+   /**
+    * Upper bound on the pre-generation radius, derived from what Voxy can actually hold in GPU memory.
+    *
+    * <h2>Why this exists</h2>
+    * Pre-generation is only useful if Voxy can keep the result resident. When the geometry buffer is much
+    * smaller than the render distance implies, the extra chunks are generated, uploaded and then evicted
+    * again -- pure cost, no visible benefit, and it competes with chunk generation for the same CPU.
+    *
+    * <h2>How the budget is derived</h2>
+    * Voxy sizes its geometry buffer in {@code VoxyRenderSystem.getGeometryBufferSize()} (verified with
+    * {@code javap -p -c}); the relevant part is
+    * <pre>
+    *   free = Capabilities.getFreeDedicatedGpuMemory() - 1610612736L      // 1.5 GB reserved
+    *   free = Math.max(536870912L, free)                                  // floor 512 MB
+    *   size = Math.min(ssboCap, free)
+    * </pre>
+    * Measured on this machine (GT 740, 2 GB, log line "1328MB of free memory"):
+    * <pre>
+    *   1392508928 - 1610612736 = -218103808   (negative)
+    *   Math.max(536870912, -218103808) = 536870912   -> 512 MB, matching the logged
+    *   "Voxy render system created with 536870912 geometry capacity"
+    * </pre>
+    * So a small card lands on the 512 MB floor. The cap below is scaled from that floor: the 512 MB case
+    * gets the conservative radius, and each doubling of the budget adds one step. The numbers are
+    * deliberately conservative -- generating slightly too little is recoverable (Voxy fills the rest on
+    * demand), whereas over-generating wastes CPU and VRAM on a machine that has neither to spare.
+    *
+    * <p>{@code -Dtellus.voxy.radiusCap=N} overrides the cap outright; 0 disables it.
+    */
+   private static final int VRAM_AWARE_RADIUS_CAP = resolveVramAwareRadiusCap();
+
+   private static int resolveVramAwareRadiusCap() {
+      Integer explicit = Integer.getInteger("tellus.voxy.radiusCap");
+      if (explicit != null) {
+         return Math.max(0, explicit);
+      }
+      try {
+         long geometry = voxyGeometryCapacityBytes();
+         if (geometry <= 0L) {
+            return Integer.MAX_VALUE;   // unknown -> do not restrict anything
+         }
+         // One step per doubling above the 512 MB floor: 512MB->512, 1GB->1024, 2GB->2048, ...
+         long steps = Math.max(0L, Long.numberOfTrailingZeros(Long.highestOneBit(geometry)) - 29L);
+         long cap = 512L << Math.min(4L, steps);
+         return (int)Math.min(Integer.MAX_VALUE, cap);
+      } catch (Throwable t) {
+         return Integer.MAX_VALUE;      // never let a probe failure shrink the world
+      }
+   }
+
+   /**
+    * Reads Voxy's geometry capacity through the same class that logs it, without linking against Voxy at
+    * compile time (Voxy is a soft dependency and is not on the compile classpath).
+    */
+   private static long voxyGeometryCapacityBytes() {
+      try {
+         Class<?> renderSystem = Class.forName("me.cortex.voxy.client.core.VoxyRenderSystem");
+         for (java.lang.reflect.Field field : renderSystem.getDeclaredFields()) {
+            if (field.getType() == long.class
+                  && (field.getName().toLowerCase(java.util.Locale.ROOT).contains("geometry")
+                      || field.getName().toLowerCase(java.util.Locale.ROOT).contains("capacity"))) {
+               field.setAccessible(true);
+               return field.getLong(null);
+            }
+         }
+      } catch (Throwable ignored) {
+         // Voxy absent, or the field was renamed in a newer build -> caller keeps the unrestricted cap.
+      }
+      return 0L;
    }
 
    public int effectiveChunksPerTick(EarthGeneratorSettings settings) {
@@ -511,8 +583,50 @@ public final class TellusVoxyPregenManager {
       }
    }
 
+   /**
+    * How many chunk requests pre-generation may launch this tick.
+    *
+    * <h2>2026-10-12: tick time alone is not enough</h2>
+    * The original version only looked at {@code averageTickNanos}, and its fast branch actively <b>raised</b>
+    * the quota when the tick was healthy ({@code base + base/2}). That is wrong for an asynchronous workload:
+    * requests are submitted and return later, so a backlog does not show up in tick time until it is already
+    * deep. Measured on a 1:1 world with pre-generation enabled, structure generation degraded monotonically
+    * as the backlog grew:
+    * <pre>
+    *   23:49:01  super=5253ms/241    (22 ms per chunk)
+    *   23:49:03  super=10651ms/151   (71 ms)
+    *   23:50:45  super=44891ms/94    (478 ms)
+    *   23:52:03  super=77122ms/1     (77 seconds for one chunk)
+    *   23:53:16  super=77589ms/1
+    * </pre>
+    * and the server tick climbed 40s -> 80s -> ... -> 243s. Pre-generation was competing with the very chunk
+    * generation the player was waiting on.
+    *
+    * <h2>What changed</h2>
+    * Two guards, both based on the work already in hand rather than on tick time:
+    * <ul>
+    *   <li><b>Backlog ceiling.</b> Above {@link #BACKLOG_SOFT_LIMIT} queued-or-in-flight requests the quota
+    *       drops to one per tick, and above {@link #BACKLOG_HARD_LIMIT} it stops entirely, so the queue drains
+    *       before more is added and pre-generation cannot run ahead of what the pipeline absorbs.</li>
+    *   <li><b>No more speculative growth.</b> The healthy-tick branch no longer multiplies the quota. The
+    *       caller's {@code chunksPerTick} is now a ceiling rather than a starting point to grow from.</li>
+    * </ul>
+    * The tick-time checks are kept as a second line of defence for genuine synchronous stalls.
+    *
+    * <p>{@code -Dtellus.voxy.backlogSoftLimit=N} / {@code -Dtellus.voxy.backlogHardLimit=N} override the
+    * thresholds.
+    */
    private int effectiveLaunchBudget(int chunksPerTick, long averageTickNanos) {
       int base = Math.max(1, chunksPerTick);
+
+      int backlog = this.queuedChunkCount() + this.inFlightChunkCount();
+      if (backlog >= BACKLOG_HARD_LIMIT) {
+         return 0;
+      }
+      if (backlog >= BACKLOG_SOFT_LIMIT) {
+         return 1;
+      }
+
       if (averageTickNanos >= HARD_OVERLOAD_TICK_NANOS) {
          return 0;
       } else if (averageTickNanos >= SOFT_OVERLOAD_TICK_NANOS) {
@@ -520,9 +634,22 @@ public final class TellusVoxyPregenManager {
       } else if (averageTickNanos >= TICK_NANOS) {
          return Math.max(1, base / 2);
       } else {
-         return averageTickNanos < TICK_NANOS - 10000000L ? Math.min(base + Math.max(1, base / 2), ABSOLUTE_MAX_IN_FLIGHT) : base;
+         return base;
       }
    }
+
+   /**
+    * Backlog thresholds for pre-generation, counted as queued + in-flight requests.
+    *
+    * <p>Chosen from the observed queue sizes rather than guessed: with the old code the queue reached
+    * thousands while structure generation stalled. One chunk is 1188 sections at 1:1, so a few hundred
+    * outstanding requests is already a lot of work to be holding.
+    */
+   private static final int BACKLOG_SOFT_LIMIT = Math.max(1,
+      Integer.getInteger("tellus.voxy.backlogSoftLimit", 64));
+
+   private static final int BACKLOG_HARD_LIMIT = Math.max(BACKLOG_SOFT_LIMIT + 1,
+      Integer.getInteger("tellus.voxy.backlogHardLimit", 256));
 
 
    private Long pollNextChunk() {

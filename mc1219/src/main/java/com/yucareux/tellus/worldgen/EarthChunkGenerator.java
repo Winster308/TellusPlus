@@ -437,6 +437,30 @@ public final class EarthChunkGenerator extends ChunkGenerator {
    private final ThreadLocal<EarthChunkGenerator.WaterChunkCache> waterChunkCache = ThreadLocal.withInitial(EarthChunkGenerator.WaterChunkCache::new);
    private final ThreadLocal<EarthChunkGenerator.OsmOverlayScratch> osmOverlayScratch = ThreadLocal.withInitial(EarthChunkGenerator.OsmOverlayScratch::new);
    private final ThreadLocal<EarthChunkGenerator.LodMountainTransitionCache> lodMountainTransitionCache = new ThreadLocal<>();
+
+   /**
+    * Per-thread memo for the mountain surface rules' neighbourhood probes.
+    *
+    * <h2>Why</h2>
+    * The detailed surface path ({@code applySlopeSurfaceOverride}) probes a ring of neighbours around every
+    * column: three distances x four directions, and the snow-retention path adds more. Every probe ends in
+    * {@code sampleCoverClass} + {@code sampleVisualCoverClass}. Measured on a 1:1 world:
+    * <pre>
+    *   surface=245.03ms/3  paletteResolve=243.82ms/3   <- detailed path
+    *   surface=  9.66ms/3  paletteResolve=  9.31ms/3   <- approximate path, 25x cheaper
+    *   fast path taken: 0 of 121 calls
+    * </pre>
+    * Adjacent columns share almost all of their 16/32/48-block rings, so the same (x, z) is asked for many
+    * times per chunk, and the answer cannot change while the chunk is being built.
+    *
+    * <h2>Scope</h2>
+    * Thread-local, and cleared around each chunk build, so a stale answer can never leak between chunks or
+    * worlds. Capped, because a chunk touches only a few hundred distinct probe points and an unbounded map
+    * would just grow.
+    */
+   private final ThreadLocal<EarthChunkGenerator.MountainProbeCache> mountainProbeCache =
+      ThreadLocal.withInitial(EarthChunkGenerator.MountainProbeCache::new);
+
    private final ThreadLocal<Boolean> lodShorelineOverrideSuppressed = new ThreadLocal<>();
    private final Map<Long, EarthChunkGenerator.PreparedChunkBuildings> preparedChunkBuildings = new ConcurrentHashMap<>();
    private final Map<Long, EarthChunkGenerator.PreparedChunkRoadLights> preparedChunkRoadLights = new ConcurrentHashMap<>();
@@ -3864,11 +3888,18 @@ public final class EarthChunkGenerator extends ChunkGenerator {
                long writeStart = beginFullChunkProfiling();
                PalettedContainer<BlockState> states = section.getStates();
                section.acquire();
+               boolean bulkFilled;
                try {
-                  for (int y = 0; y < 16; y++) {
-                     for (int z = 0; z < 16; z++) {
-                        for (int x = 0; x < 16; x++) {
-                           states.getAndSetUnchecked(x, y, z, fillState);
+                  // 2026-10-12: raw-storage bulk fill when the whole section takes one state; falls back to the
+                  // per-block loop otherwise. This is the largest single cost in chunk generation at 1:1
+                  // (solidSections 90604 ms over 241 chunks) and the two loops were identical copies.
+                  bulkFilled = TellusBulkSectionFill.tryFillWholeSection(section, fillState);
+                  if (!bulkFilled) {
+                     for (int y = 0; y < 16; y++) {
+                        for (int z = 0; z < 16; z++) {
+                           for (int x = 0; x < 16; x++) {
+                              states.getAndSetUnchecked(x, y, z, fillState);
+                           }
                         }
                      }
                   }
@@ -3877,7 +3908,9 @@ public final class EarthChunkGenerator extends ChunkGenerator {
                }
                long writeNs = elapsedFullChunkProfilingSince(writeStart);
                long recalcStart = beginFullChunkProfiling();
-               section.recalcBlockCounts();
+               if (!bulkFilled) {
+                  section.recalcBlockCounts();
+               }
                long recalcNs = elapsedFullChunkProfilingSince(recalcStart);
                solidSections[idx] = true;
                return new long[]{accessNs, writeNs, recalcNs};
@@ -3945,12 +3978,23 @@ public final class EarthChunkGenerator extends ChunkGenerator {
       PalettedContainer<BlockState> states = section.getStates();
       long sectionWriteStartNs = beginFullChunkProfiling();
       section.acquire();
-
+      boolean bulkFilled;
       try {
-         for (int y = 0; y < 16; y++) {
-            for (int z = 0; z < 16; z++) {
-               for (int x = 0; x < 16; x++) {
-                  states.getAndSetUnchecked(x, y, z, fill);
+         // 2026-10-12: try the raw-storage bulk fill first.
+         //
+         // The loop below runs getAndSetUnchecked 4096 times per section, and each call performs a palette
+         // lookup plus a decode of the previous value that nobody reads. Measured at 1:1 (1188 sections per
+         // chunk): solidSections 90604 ms total, of which sectionWrite 43824 ms and recalc 15946 ms.
+         // tryFillWholeSection writes the repeating bit pattern straight into the palette storage array and
+         // returns false -- leaving this loop to run exactly as before -- whenever it cannot prove the
+         // shortcut is valid. See its class doc for the correctness argument.
+         bulkFilled = TellusBulkSectionFill.tryFillWholeSection(section, fill);
+         if (!bulkFilled) {
+            for (int y = 0; y < 16; y++) {
+               for (int z = 0; z < 16; z++) {
+                  for (int x = 0; x < 16; x++) {
+                     states.getAndSetUnchecked(x, y, z, fill);
+                  }
                }
             }
          }
@@ -3960,7 +4004,9 @@ public final class EarthChunkGenerator extends ChunkGenerator {
       profiler.sectionWriteNs += elapsedFullChunkProfilingSince(sectionWriteStartNs);
 
       long sectionRecalcStartNs = beginFullChunkProfiling();
-      section.recalcBlockCounts();
+      if (!bulkFilled) {
+         section.recalcBlockCounts();
+      }
       profiler.recalcNs += elapsedFullChunkProfilingSince(sectionRecalcStartNs);
    }
 
@@ -5411,7 +5457,6 @@ public final class EarthChunkGenerator extends ChunkGenerator {
    private boolean shouldUseDetailedMountainSurface(int surfaceCoverClass, int surface, int slopeDiff, int convexity) {
       return MountainSurfaceRules.qualifiesForMountainPalette(surfaceCoverClass, surface - this.seaLevel, slopeDiff, convexity);
    }
-
    private EarthChunkGenerator.SurfacePalette applyFullChunkOceanBeachPaletteOverride(
       EarthChunkGenerator.SurfacePalette palette,
       Holder<Biome> biome,
@@ -6367,6 +6412,13 @@ public final class EarthChunkGenerator extends ChunkGenerator {
       );
       boolean useFastSurfacePalette = FAST_FULL_CHUNK && FULL_CHUNK_SURFACE_MODE == EarthChunkGenerator.SurfaceMode.TWO_TIER;
       EarthChunkGenerator.SurfaceApplyProfiler profiler = new EarthChunkGenerator.SurfaceApplyProfiler();
+      // 2026-10-12: drop the probe memo from the previous chunk. This is the one place the surface pass starts,
+      // so it is the natural boundary: a stale entry can never survive into the next chunk, and the table stays
+      // sized for one chunk's working set.
+      EarthChunkGenerator.MountainProbeCache probeCache = this.mountainProbeCache.get();
+      if (probeCache != null) {
+         probeCache.clear();
+      }
       int[] shellTerrainSurfaces = shell.terrainSurfaces();
       int[] shellWaterSurfaces = shell.waterSurfaces();
       boolean[] shellWaterFlags = shell.waterFlags();
@@ -8935,7 +8987,54 @@ public final class EarthChunkGenerator extends ChunkGenerator {
          return cache.sampleVegetationWeight(worldX, worldZ, heightAboveSea);
       }
 
+      // 2026-10-12: memoise the probe. Without this every neighbour ring sample re-reads the cover data for
+      // the same coordinates (see the note on mountainProbeCache). Keyed by position only -- heightAboveSea is
+      // derived from the position by the sampler, so two probes at the same (x, z) always get the same value.
+      EarthChunkGenerator.MountainProbeCache probeCache = this.mountainProbeCache.get();
+      if (probeCache != null) {
+         return probeCache.sample(this, worldX, worldZ, heightAboveSea);
+      }
+
       return this.sampleMountainVegetationWeightUncached(worldX, worldZ, heightAboveSea);
+   }
+
+   /**
+    * Bounded per-thread memo for {@link #sampleMountainVegetationWeightUncached}.
+    *
+    * <p>Small open-addressing table rather than a map: the working set is a few hundred entries per chunk and
+    * the probes are on the hot path of every surface column, so allocation and boxing are worth avoiding.
+    * Collisions simply overwrite, which costs a recompute but can never return a wrong answer.
+    */
+   static final class MountainProbeCache {
+      private static final int SIZE = 4096;
+      private static final int MASK = SIZE - 1;
+
+      private final int[] keyX = new int[SIZE];
+      private final int[] keyZ = new int[SIZE];
+      private final float[] value = new float[SIZE];
+      private final boolean[] used = new boolean[SIZE];
+
+      void clear() {
+         java.util.Arrays.fill(this.used, false);
+      }
+
+      float sample(EarthChunkGenerator generator, int worldX, int worldZ, int heightAboveSea) {
+         int slot = hash(worldX, worldZ) & MASK;
+         if (this.used[slot] && this.keyX[slot] == worldX && this.keyZ[slot] == worldZ) {
+            return this.value[slot];
+         }
+         float result = generator.sampleMountainVegetationWeightUncached(worldX, worldZ, heightAboveSea);
+         this.keyX[slot] = worldX;
+         this.keyZ[slot] = worldZ;
+         this.value[slot] = result;
+         this.used[slot] = true;
+         return result;
+      }
+
+      private static int hash(int x, int z) {
+         int h = x * 0x9E3779B1 ^ z * 0x85EBCA77;
+         return h ^ (h >>> 15);
+      }
    }
 
    private float sampleMountainVegetationWeightUncached(int worldX, int worldZ, int heightAboveSea) {

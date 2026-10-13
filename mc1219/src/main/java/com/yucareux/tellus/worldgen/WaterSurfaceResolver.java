@@ -305,8 +305,10 @@ public final class WaterSurfaceResolver {
             int surface = cached.rawSurface(blockX, blockZ);
             return new WaterSurfaceResolver.WaterColumnData(false, false, surface, surface);
          } else {
-            TellusLandMaskSource.LandMaskSample landMaskSample = this.landMaskSource.sampleLandMask(blockX, blockZ, this.settings.worldScale());
-            int surface = this.sampleSurfaceHeight(blockX, blockZ, coverClass, landMaskSample, previewResolutionMeters);
+            // 2026-10-11: LocalOnly. This is the non-water branch, so the exact water surface is not needed
+            // at all -- only a terrain height. The network-capable pair here blocked chunk generation.
+            TellusLandMaskSource.LandMaskSample landMaskSample = this.landMaskSource.sampleLandMaskLocalOnly(blockX, blockZ, this.settings.worldScale());
+            int surface = this.sampleSurfaceHeightLocalOnly(blockX, blockZ, coverClass, landMaskSample);
             return new WaterSurfaceResolver.WaterColumnData(false, false, surface, surface);
          }
       } else {
@@ -315,15 +317,35 @@ public final class WaterSurfaceResolver {
             return cached.columnData(blockX, blockZ);
          } else {
             if (!this.osmWaterEnabled && coverClass == ESA_NO_DATA) {
-               TellusLandMaskSource.LandMaskSample landMaskSample = this.landMaskSource.sampleLandMask(blockX, blockZ, this.settings.worldScale());
-               int surface = this.sampleSurfaceHeight(blockX, blockZ, coverClass, landMaskSample, previewResolutionMeters);
+               TellusLandMaskSource.LandMaskSample landMaskSample = this.landMaskSource.sampleLandMaskLocalOnly(blockX, blockZ, this.settings.worldScale());
+               int surface = this.sampleSurfaceHeightLocalOnly(blockX, blockZ, coverClass, landMaskSample);
                if (surface > this.seaLevel) {
                   return new WaterSurfaceResolver.WaterColumnData(false, false, surface, surface);
                }
             }
 
-            WaterSurfaceResolver.WaterRegionData region = this.resolveRegionData(regionX, regionZ);
-            return region.columnData(blockX, blockZ);
+            // 2026-10-11: the region build below (resolveRegionData -> buildRegionData) samples a whole grid
+            // around this column and, on a cache miss, blocks on the shared download pool for each cell.
+            // Measured on a 1:1 world, reached from EarthChunkGenerator.isFrozenPeaksChunk via
+            // EarthBiomeSource.resolveBiomeAtBlock(:168) on the c2me chunk-generation worker:
+            //   TellusDownloadExecutor.await(:410)
+            //     <- TellusLandMaskSource.sampleLandMask(:87)
+            //     <- TellusElevationSource.computeAutoDecision(:1978)
+            //     <- WaterSurfaceResolver.sampleSurfaceHeight(:2147)
+            //     <- WaterSurfaceResolver.buildRegionData(:816)
+            //     <- WaterSurfaceResolver.resolveRegionData(:450)
+            //     <- WaterSurfaceResolver.resolveColumnData(:325)     <- here
+            //     <- EarthBiomeSource.resolveBiomeAtBlock(:168)
+            //     <- EarthChunkGenerator.isFrozenPeaksChunk(:9466)
+            // The chunk worker stalled, the pipeline stopped after the solid-rock pass, and the player saw
+            // "deepslate everywhere with nothing above it". When the region is not already cached, fall back
+            // to the coarse local-only column instead of building one over the network. The exact path is
+            // unchanged for callers that have already warmed the region (the cached branch above).
+            WaterSurfaceResolver.WaterRegionData region = this.getRegionIfPresent(regionX, regionZ);
+            if (region != null) {
+               return region.columnData(blockX, blockZ);
+            }
+            return this.coarseWaterColumnData(blockX, blockZ, coverClass, previewResolutionMeters);
          }
       }
    }
@@ -642,8 +664,35 @@ public final class WaterSurfaceResolver {
    }
 
    private WaterSurfaceResolver.WaterColumnData coarseWaterColumnData(int blockX, int blockZ, int coverClass, double previewResolutionMeters) {
-      TellusLandMaskSource.LandMaskSample landMaskSample = this.landMaskSource.sampleLandMask(blockX, blockZ, this.settings.worldScale());
-      int surface = this.sampleSurfaceHeight(blockX, blockZ, coverClass, landMaskSample, previewResolutionMeters);
+      // 2026-10-11: this used the network-capable variants. A coarse fallback that blocks on a download
+      // contradicts its own purpose, and in practice it stalled chunk generation outright.
+      //
+      // Measured (client log, 1.21.9, 1:1 world):
+      //   "c2me-worker-0" TIMED_WAITING on FutureTask
+      //     at TellusDownloadExecutor.await(:410)
+      //     at CopernicusDemElevationSource.sampleElevationMeters(:115)
+      //     at TellusElevationSource.sampleAutomaticMeters(:1395)
+      //     at WaterSurfaceResolver.sampleSurfaceHeight(:2120)
+      //     at WaterSurfaceResolver.coarseWaterColumnData(:646)          <- this line
+      //     at WaterSurfaceResolver.resolveFastColumnData(:352)
+      //     at EarthBiomeSource.resolveBiomeAtBlock(:167)
+      //     at EarthChunkGenerator.isFrozenPeaksChunk(:9466)
+      //     at EarthChunkGenerator.method_16129(:985)                    <- setBlockState
+      //     at ... VanillaWorldGenerationDelegate.lambda$upgradeToThis$3
+      //
+      // isFrozenPeaksChunk is a cheap "is this a frozen-peaks chunk" test, but it reached the shared
+      // download pool and waited. Because it runs inside the chunk-generation pipeline, the whole
+      // pipeline stalled behind it: the server thread then waited in getChunkBlocking while the tick
+      // time climbed 40 s -> 80 s -> 121 s -> 162 s -> 203 s, and the terrain stopped after the solid
+      // rock pass, which is what a player sees as "deepslate everywhere, nothing above it".
+      //
+      // Both reads now go through the *LocalOnly variants, matching the all-local probe path a few
+      // hundred lines below (sampleLandMaskLocalOnly / sampleCoverClassLocalOnly /
+      // sampleSurfaceHeightLocalOnly). A cache miss yields the class sentinel instead of a download, so
+      // the fallback stays a fallback. Exactness is unaffected: coarseWaterColumnData is already the
+      // approximate path, and the precise path (resolveColumnData / buildRegionData) is untouched.
+      TellusLandMaskSource.LandMaskSample landMaskSample = this.landMaskSource.sampleLandMaskLocalOnly(blockX, blockZ, this.settings.worldScale());
+      int surface = this.sampleSurfaceHeightLocalOnly(blockX, blockZ, coverClass, landMaskSample);
       boolean isOcean = OceanClassification.isOcean(false, landMaskSample, surface, coverClass, this.seaLevel);
       if (!shouldEmitCoarseFallbackWater(this.osmWaterEnabled, coverClass, isOcean)) {
          return new WaterSurfaceResolver.WaterColumnData(false, false, surface, surface);
@@ -782,11 +831,28 @@ public final class WaterSurfaceResolver {
          for (int dx = 0; dx < gridSize; dx++) {
             int worldX = gridMinX + dx;
             int index = row + dx;
-            TellusLandMaskSource.LandMaskSample landMaskSample = this.landMaskSource.sampleLandMask(worldX, worldZ, worldScale);
+            // 2026-10-12: LocalOnly for the region sweep itself.
+            //
+            // This loop is gridSize^2 iterations -- at 1:1 the margin reaches 512, so gridSize is 1088 and one
+            // region build is 1.18 million samples. Each iteration used to call the network-capable samplers,
+            // and a cache miss inside those could start *another* prefetch, which built *another* region --
+            // measured as a nested stack:
+            //   resolveChunkWaterDataFast(:227)
+            //     -> prefetchRegion(:437) -> buildRegionData(:837)
+            //          -> sampleSurfaceHeight(:2169) -> prefetchRegionsForChunk(:260)
+            //            -> prefetchRegion(:437) -> buildRegionData(:837)      <- same method, second frame
+            // The result was waterResolve=503878.90ms/2, i.e. 252 seconds for one chunk, with the server tick
+            // climbing 40s -> 80s -> ... -> 730s and never finishing.
+            //
+            // Reading only what is already cached breaks the cycle: this sweep can never trigger another
+            // region build. Coverage is unaffected in practice because the prefetch that led here has already
+            // downloaded the tiles for this area -- the values are present, they were simply being re-fetched
+            // through a path that could recurse.
+            TellusLandMaskSource.LandMaskSample landMaskSample = this.landMaskSource.sampleLandMaskLocalOnly(worldX, worldZ, worldScale);
             boolean maskKnown = landMaskSample.known();
             boolean landMaskIsLand = maskKnown && landMaskSample.land();
-            int coverClass = this.landCoverSource.sampleCoverClass(worldX, worldZ, worldScale);
-            int surface = this.sampleSurfaceHeight(worldX, worldZ, coverClass, landMaskSample);
+            int coverClass = this.landCoverSource.sampleCoverClassLocalOnly(worldX, worldZ, worldScale, worldScale);
+            int surface = this.sampleSurfaceHeightLocalOnly(worldX, worldZ, coverClass, landMaskSample);
             boolean isNoData = coverClass == ESA_NO_DATA;
             boolean oceanMask;
             if (maskKnown) {

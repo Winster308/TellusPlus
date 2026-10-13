@@ -39,13 +39,29 @@ public final class TellusCnOptions {
    public enum DataSource {
       TELLUS, ARNIS;
 
+      /**
+       * The source used when {@code telluscn.json} has no {@code dataSource} key, or carries a value that is
+       * not recognised.
+       *
+       * <p>2026-10-11: this used to be {@link #TELLUS}. The default is now {@link #ARNIS}, so a fresh install
+       * reads elevation through the arnis chain (Mapterhorn global elevation first) without anyone having to
+       * open the settings screen. The tellus chain remains available and is still what a failed arnis read
+       * falls back to, so nothing is lost by changing the starting point.
+       *
+       * <p>An existing {@code telluscn.json} that already names a source keeps it: {@link #parse} only decides
+       * the default, it does not override a value that is present. Switching back is a single key in the
+       * config file or one click in the manage screen.
+       */
+      public static final DataSource DEFAULT = ARNIS;
+
       public static DataSource parse(String raw) {
          if (raw == null) {
-            return TELLUS;
+            return DEFAULT;
          }
          return switch (raw.trim().toLowerCase(Locale.ROOT)) {
             case "arnis" -> ARNIS;
-            default -> TELLUS;
+            case "tellus" -> TELLUS;
+            default -> DEFAULT;
          };
       }
    }
@@ -81,7 +97,12 @@ public final class TellusCnOptions {
 
    /** On-disk structure. */
    private static final class Data {
-      String dataSource = DataSource.TELLUS.name();
+      /**
+       * 2026-10-11: was hard-coded to {@code TELLUS.name()}. A fresh {@code telluscn.json} now starts on the
+       * arnis chain, which is what the mod is meant to use by default; {@link DataSource#DEFAULT} is the one
+       * place that decision lives.
+       */
+      String dataSource = DataSource.DEFAULT.name();
       String celestialBody = CelestialBody.EARTH.name();
       /**
        * Map theme. Defaults to {@code openfreemap-liberty}: **no key is needed**,

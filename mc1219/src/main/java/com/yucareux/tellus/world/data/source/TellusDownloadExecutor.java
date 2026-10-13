@@ -80,8 +80,24 @@ import java.util.concurrent.atomic.AtomicLong;
 public final class TellusDownloadExecutor {
 
    private static final int CORES = Runtime.getRuntime().availableProcessors();
+
+   /**
+    * Download pool size.
+    *
+    * <p>2026-10-11: this used to be {@code max(4, min(12, CORES * 3))}. That formula assumes the pool is the
+    * bottleneck, which it is not: these threads spend most of their time parked on HTTP reads, so a wide pool
+    * costs little when there are cores to spare. On a small machine it costs a lot. Measured on a 4-core
+    * i5-3470, the old formula asked for 12 download threads, and the game also runs c2me chunk workers, the
+    * server thread, the render thread and Voxy's pool on top of that -- roughly 17 runnable threads for 4
+    * cores, which is context-switch overhead rather than throughput, and the player sees the CPU "barely
+    * loaded" because most threads are queued rather than running.
+    *
+    * <p>The pool is now sized to the machine: about one and a half threads per core, never more than 12 and
+    * never fewer than 4. Four cores therefore get 6 instead of 12, while a 16-core machine still gets the cap.
+    * {@code -Dtellus.download.threads=N} overrides it either way.
+    */
    private static final int THREADS = intProperty("tellus.download.threads",
-         Math.max(4, Math.min(12, CORES * 3)));
+         Math.max(4, Math.min(12, (CORES * 3) / 2)));
    private static final int QUEUE_CAPACITY = intProperty("tellus.download.queue", 8192);
 
    /** In-pool flag: prevents nested dispatch from filling the pool with threads waiting on each other. */

@@ -44,3 +44,6 @@ TellusCN-Cloudflare-Workers/
 
 # build logs
 action-build.log
+
+# release binaries -- distributed as GitHub Release assets, not committed
+releases/*.jar

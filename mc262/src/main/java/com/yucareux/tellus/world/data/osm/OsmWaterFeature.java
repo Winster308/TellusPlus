@@ -1,0 +1,199 @@
+package com.yucareux.tellus.world.data.osm;
+
+import com.yucareux.tellus.worldgen.EarthProjection;
+import java.util.Objects;
+
+public final class OsmWaterFeature {
+   private static final double LINE_HALF_WIDTH_BLOCKS = 0.5;
+   private final long featureId;
+   private final boolean lineGeometry;
+   private final boolean oceanHint;
+   private final double[][] longitudes;
+   private final double[][] latitudes;
+   private final double minLon;
+   private final double maxLon;
+   private final double minLat;
+   private final double maxLat;
+
+   public OsmWaterFeature(long featureId, boolean lineGeometry, boolean oceanHint, double[][] longitudes, double[][] latitudes) {
+      this.featureId = featureId;
+      this.lineGeometry = lineGeometry;
+      this.oceanHint = oceanHint;
+      this.longitudes = copyParts(Objects.requireNonNull(longitudes, "longitudes"));
+      this.latitudes = copyParts(Objects.requireNonNull(latitudes, "latitudes"));
+      if (this.longitudes.length != this.latitudes.length || this.longitudes.length == 0) {
+         throw new IllegalArgumentException("Geometry part count mismatch for the water feature");
+      } else {
+         double lowLon = Double.POSITIVE_INFINITY;
+         double highLon = Double.NEGATIVE_INFINITY;
+         double lowLat = Double.POSITIVE_INFINITY;
+         double highLat = Double.NEGATIVE_INFINITY;
+
+         for (int part = 0; part < this.longitudes.length; part++) {
+            double[] lonPart = this.longitudes[part];
+            double[] latPart = this.latitudes[part];
+            int minPoints = this.lineGeometry ? 2 : 4;
+            if (lonPart.length != latPart.length || lonPart.length < minPoints) {
+               throw new IllegalArgumentException("Invalid point count for the water feature part");
+            }
+
+            for (int point = 0; point < lonPart.length; point++) {
+               double lon = lonPart[point];
+               double lat = latPart[point];
+               lowLon = Math.min(lowLon, lon);
+               highLon = Math.max(highLon, lon);
+               lowLat = Math.min(lowLat, lat);
+               highLat = Math.max(highLat, lat);
+            }
+         }
+
+         this.minLon = lowLon;
+         this.maxLon = highLon;
+         this.minLat = lowLat;
+         this.maxLat = highLat;
+      }
+   }
+
+   public long featureId() {
+      return this.featureId;
+   }
+
+   public boolean lineGeometry() {
+      return this.lineGeometry;
+   }
+
+   public boolean oceanHint() {
+      return this.oceanHint;
+   }
+
+   public int partCount() {
+      return this.longitudes.length;
+   }
+
+   public int pointCount(int partIndex) {
+      return this.longitudes[partIndex].length;
+   }
+
+   public double lonAt(int partIndex, int pointIndex) {
+      return this.longitudes[partIndex][pointIndex];
+   }
+
+   public double latAt(int partIndex, int pointIndex) {
+      return this.latitudes[partIndex][pointIndex];
+   }
+
+   public double minLon() {
+      return this.minLon;
+   }
+
+   public double maxLon() {
+      return this.maxLon;
+   }
+
+   public double minLat() {
+      return this.minLat;
+   }
+
+   public double maxLat() {
+      return this.maxLat;
+   }
+
+   public boolean intersects(double south, double west, double north, double east) {
+      return this.maxLon >= west && this.minLon <= east && this.maxLat >= south && this.minLat <= north;
+   }
+
+   public boolean containsBlock(int blockX, int blockZ, double worldScale) {
+      if (worldScale <= 0.0) {
+         return false;
+      } else if (this.lineGeometry) {
+         return this.touchesBlockLine(blockX, blockZ, worldScale);
+      } else {
+         double blocksPerDegree = EarthProjection.blocksPerDegree(worldScale);
+         double lon = blockX / blocksPerDegree;
+         double lat = EarthProjection.blockZToLat(blockZ, worldScale);
+         return this.containsLonLat(lon, lat);
+      }
+   }
+
+   public boolean containsLonLat(double lon, double lat) {
+      if (this.lineGeometry || lon < this.minLon || lon > this.maxLon || lat < this.minLat || lat > this.maxLat) {
+         return false;
+      } else {
+         boolean inside = false;
+
+         for (int part = 0; part < this.longitudes.length; part++) {
+            double[] lonPart = this.longitudes[part];
+            double[] latPart = this.latitudes[part];
+            int points = lonPart.length;
+
+            for (int i = 0, j = points - 1; i < points; j = i++) {
+               double lonA = lonPart[i];
+               double latA = latPart[i];
+               double lonB = lonPart[j];
+               double latB = latPart[j];
+               if ((latA > lat) != (latB > lat)) {
+                  double crossLon = (lonB - lonA) * (lat - latA) / (latB - latA) + lonA;
+                  if (lon <= crossLon) {
+                     inside = !inside;
+                  }
+               }
+            }
+         }
+
+         return inside;
+      }
+   }
+
+   private boolean touchesBlockLine(int blockX, int blockZ, double worldScale) {
+      double blocksPerDegree = EarthProjection.blocksPerDegree(worldScale);
+      double queryX = blockX;
+      double queryZ = blockZ;
+      double maxDistanceSq = LINE_HALF_WIDTH_BLOCKS * LINE_HALF_WIDTH_BLOCKS + 1.0E-6;
+
+      for (int part = 0; part < this.longitudes.length; part++) {
+         double[] lonPart = this.longitudes[part];
+         double[] latPart = this.latitudes[part];
+
+         for (int point = 1; point < lonPart.length; point++) {
+            double startX = lonPart[point - 1] * blocksPerDegree;
+            double startZ = EarthProjection.latToBlockZ(latPart[point - 1], worldScale);
+            double endX = lonPart[point] * blocksPerDegree;
+            double endZ = EarthProjection.latToBlockZ(latPart[point], worldScale);
+            if (distanceToSegmentSq(queryX, queryZ, startX, startZ, endX, endZ) <= maxDistanceSq) {
+               return true;
+            }
+         }
+      }
+
+      return false;
+   }
+
+   private static double distanceToSegmentSq(double px, double pz, double ax, double az, double bx, double bz) {
+      double dx = bx - ax;
+      double dz = bz - az;
+      double lengthSq = dx * dx + dz * dz;
+      if (lengthSq <= 1.0E-9) {
+         double distX = px - ax;
+         double distZ = pz - az;
+         return distX * distX + distZ * distZ;
+      } else {
+         double t = ((px - ax) * dx + (pz - az) * dz) / lengthSq;
+         t = Math.max(0.0, Math.min(1.0, t));
+         double projX = ax + t * dx;
+         double projZ = az + t * dz;
+         double distX = px - projX;
+         double distZ = pz - projZ;
+         return distX * distX + distZ * distZ;
+      }
+   }
+
+   private static double[][] copyParts(double[][] input) {
+      double[][] copy = new double[input.length][];
+
+      for (int i = 0; i < input.length; i++) {
+         copy[i] = input[i].clone();
+      }
+
+      return copy;
+   }
+}

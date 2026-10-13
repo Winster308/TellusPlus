@@ -16,15 +16,58 @@ plugins {
 rootProject.name = 'Tellus'
 
 // ---------------------------------------------------------------------------
-// 1.21.9 分支：本仓库原来的 mc1201 / mc1211 / mc261 三个目标暂时不参与配置。
-// 原因：它们各自锁定了不同版本的 Loom（其中 mc1211 用的是 1.14-SNAPSHOT），
-// 一起配置会让根工程在解析插件时把不相关的目标也拉起来，构建 1.21.9 时会
-// 因为它们的依赖/插件不可达而整体失败。需要哪个目标就把它放回来。
+// Target selection
+//
+// Each Minecraft version needs a different Fabric Loom, and Loom versions are not
+// interchangeable: mc1219 uses fabric-loom 1.17.20, the 26.x line uses
+// fabric-loom 1.16.x, and an older target may need something else again.
+//
+// If every target were included unconditionally, Gradle would resolve all of their
+// plugins during configuration, and one unreachable or conflicting Loom would fail
+// the build for *every* target -- including the one being built. That is exactly
+// what happened here before: the three older targets were commented out with a note
+// saying they "each pin a different Loom version", leaving only mc1219 buildable.
+//
+// So targets are opt-in:
+//
+//   ./gradlew build                 -> builds mc1219 only (the default)
+//   ./gradlew -Ptarget=mc1201 build -> builds mc1201 only
+//   ./gradlew -Ptarget=all build    -> builds every target that has a build.gradle
+//
+// A target directory is only included when it actually contains a build.gradle, so a
+// half-created directory cannot break the build for the others.
 // ---------------------------------------------------------------------------
-include('mc1219')
-// include('mc1201')
-// include('mc1211')
-// include('mc261')
+
+def defaultTarget = 'mc1219'
+def knownTargets = ['mc1201', 'mc1211', 'mc1219', 'mc12111', 'mc262']
+
+def requested = (gradle.startParameter.projectProperties['target'] ?: defaultTarget)
+	.toString().split(',').collect { it.trim() }
+if (requested.contains('all')) {
+	requested = knownTargets
+}
+
+def included = []
+def skipped = []
+requested.each { t ->
+	if (!knownTargets.contains(t)) {
+		skipped << "$t (unknown target)"
+		return
+	}
+	if (!file("$t/build.gradle").exists()) {
+		skipped << "$t (no build.gradle yet)"
+		return
+	}
+	include(t)
+	included << t
+}
+
+if (!included.isEmpty()) {
+	logger.lifecycle("Tellus: building target(s) ${included.join(', ')}")
+}
+if (!skipped.isEmpty()) {
+	logger.lifecycle("Tellus: skipped ${skipped.join(', ')}")
+}
 
 dependencyResolutionManagement {
 	repositories {

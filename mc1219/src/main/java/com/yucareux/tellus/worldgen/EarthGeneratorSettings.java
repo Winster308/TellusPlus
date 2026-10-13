@@ -172,6 +172,15 @@ public record EarthGeneratorSettings(
     * while {@code Tellus} calls it twice in a row during the same launch (compute the dimension + print a comparison).
     */
    private static final boolean AUTO_HEIGHT_OVERRIDE = Boolean.getBoolean("tellus.world.autoHeight");
+
+   /**
+    * Whether the client-side tall-layout branch narrows the height range to what the world scale actually needs.
+    *
+    * <p>On by default. Set {@code -Dtellus.world.scaleAwareHeight=false} to go back to always using the layout's
+    * full range, which is only sensible for a 1:1 world.
+    */
+   private static final boolean SCALE_AWARE_HEIGHT =
+      !"false".equalsIgnoreCase(System.getProperty("tellus.world.scaleAwareHeight", "true"));
    private static final Integer FORCED_HEIGHT = Integer.getInteger("tellus.height.force");
    private static final double EVEREST_ELEVATION_METERS = 8848.0;
    private static final double MARIANA_TRENCH_METERS = -11034.0;
@@ -1486,14 +1495,64 @@ public record EarthGeneratorSettings(
    }
 
    public static EarthGeneratorSettings.HeightLimits resolveHeightLimits(EarthGeneratorSettings settings) {
-      // In the repackaged layout **the full height is used by default**: turning this mode on is exactly what a tall world is wanted for,
-      // while the automatic estimate only follows the terrain elevation (a few hundred blocks), which makes turning it on pointless. For the automatic estimate again: -Dtellus.world.autoHeight=true
+      // In the repackaged layout the layout's full range is available by default, because turning that mode on is
+      // exactly what a tall world is wanted for. The automatic estimate only follows the terrain elevation, so
+      // using it unconditionally would make the tall layout pointless. For the automatic estimate again:
+      // -Dtellus.world.autoHeight=true
       //
-      // But this "use the full height" **can only be done on the client**: really raising the dimension is a capability of the "create world" screen (client side),
-      //    on a dedicated server the dimension still keeps the height from the data packet; if this reported the full height anyway, the generator would try to fill sections
-      //    the dimension cannot hold (65536 tall vs a dimension of 800) -> spawn generation hangs. That was actually hit in server testing, hence the environment check.
+      // But this "use the full height" **can only be done on the client**: really raising the dimension is a
+      // capability of the "create world" screen (client side); on a dedicated server the dimension still keeps the
+      // height from the data packet, and if this reported the full height anyway the generator would try to fill
+      // sections the dimension cannot hold (65536 tall vs a dimension of 800) -> spawn generation hangs. That was
+      // actually hit in server testing, hence the environment check.
+      //
+      // 2026-10-11: the client branch used to return the layout's full range regardless of worldScale, which is
+      // wrong whenever the world is not 1:1. Measured on a 50:1 world (client log):
+      //   EarthChunkGenerator init: scale=50.0, ... limits=[minY=-11040, height=32640], seaLevel=64
+      //   fillFromNoise layout: ... configuredMin=-64, configuredMax=-2147483648
+      // At 50:1 the terrain only needs roughly
+      //   computeAutoMinAltitude = floor(-12000 / 50) + 64 - 50 = -226
+      //   computeAutoMaxAltitude = ceil( 8849 / 50) + 64 + 50 =  291
+      // i.e. about 517 blocks, not 32,640. The solid-rock pass still ran from minY, so every chunk filled
+      // ~10,814 blocks of rock that no terrain would ever occupy -- the single most expensive phase of chunk
+      // generation, and the reason a player sees "deepslate everywhere with nothing above it" for a long time
+      // before the surface pass catches up.
+      //
+      // The layout range stays the ceiling: the result is the auto estimate clamped into [MIN_WORLD_Y, MAX_WORLD_Y],
+      // so a 1:1 world still gets (very nearly) the full range and a compressed world gets only what it needs.
+      // -Dtellus.world.autoHeight=false restores the previous unconditional full range.
       if (TellusLayout.TALL && CLIENT_SIDE && !AUTO_HEIGHT_OVERRIDE) {
-         return new EarthGeneratorSettings.HeightLimits(MIN_WORLD_Y, MAX_WORLD_HEIGHT, MAX_WORLD_HEIGHT);
+         EarthGeneratorSettings.HeightLimits full = new EarthGeneratorSettings.HeightLimits(MIN_WORLD_Y, MAX_WORLD_HEIGHT, MAX_WORLD_HEIGHT);
+         if (!SCALE_AWARE_HEIGHT) {
+            return full;
+         }
+         double scale = settings.worldScale();
+         if (!Double.isFinite(scale) || scale <= 0.0) {
+            return full;   // a broken scale must not shrink the world
+         }
+         int wantMin = computeAutoMinAltitude(settings);
+         int wantMax = computeAutoMaxAltitude(settings);
+         if (wantMin > wantMax) {
+            int swap = wantMin;
+            wantMin = wantMax;
+            wantMax = swap;
+         }
+         int clampedMin = Mth.clamp(wantMin, MIN_WORLD_Y, MAX_WORLD_Y);
+         int clampedMax = Mth.clamp(wantMax, MIN_WORLD_Y, MAX_WORLD_Y);
+         int alignedMin = alignDown(clampedMin, HEIGHT_ALIGNMENT);
+         int alignedTop = alignUp(clampedMax + 1, HEIGHT_ALIGNMENT);
+         int height = alignedTop - alignedMin;
+         if (height < HEIGHT_ALIGNMENT || height > MAX_WORLD_HEIGHT) {
+            return full;
+         }
+         if (height < full.height()) {
+            LOGGER.info(
+               "[TellusCN] world scale {}:1 -> height range narrowed to Y {}..{} ({} blocks) instead of the layout maximum Y {}..{} ({} blocks); "
+                  + "the solid-rock pass would otherwise fill {} unused blocks per chunk",
+               scale, alignedMin, alignedTop - 1, height, MIN_WORLD_Y, MAX_WORLD_Y - 1, full.height(),
+               height < full.height() ? (long)(alignedMin - MIN_WORLD_Y) : 0L);
+         }
+         return new EarthGeneratorSettings.HeightLimits(alignedMin, height, height);
       }
       if (TellusLayout.TALL && !CLIENT_SIDE) {
          LOGGER.warn("[TellusCN] Repacked layout requested on a dedicated server (-Dtellus.world.top={}), but dimension height cannot be changed there"
