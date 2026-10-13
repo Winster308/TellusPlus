@@ -121,4 +121,3 @@ Layout parameters (world height, mirror routes) live in `config/telluscn-layout.
 Based on [Tellus](https://modrinth.com/mod/tellus) by Yucareux, and partially on Gegy's [Terrarium](https://modrinth.com/mod/terrarium).
 
 Distributed under **LGPL-3.0-only**. See [LICENSE](LICENSE) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
-

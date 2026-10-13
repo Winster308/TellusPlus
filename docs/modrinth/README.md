@@ -79,4 +79,3 @@ Tellus Plus 支持 Distant Horizons 渲染远超原版视距的行星级地形�
 布局参数（世界高度、镜像路由等）写在 `config/telluscn-layout.properties`。文件名保留 `telluscn` 前缀是为了兼容已有存档与启动参数。
 
 ---
-

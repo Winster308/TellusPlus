@@ -121,4 +121,3 @@ Tellus 把真实地球生成进 Minecraft：它把各种开源地理数据集实
 基于 Yucareux 的 [Tellus](https://modrinth.com/mod/tellus)，部分基于 Gegy 的 [Terrarium](https://modrinth.com/mod/terrarium)。
 
 以 **LGPL-3.0-only** 分发。见 [LICENSE](LICENSE) 与 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
-

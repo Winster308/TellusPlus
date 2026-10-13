@@ -19,8 +19,6 @@ Inspired by Gegy's Terrarium: https://modrinth.com/mod/terrarium
 **Server support note:** Tellus Plus must be installed on the server, but is not required on clients. Official server support is not available yet; for now you should create the world in singleplayer first, then move that world to the server (with Tellus Plus installed) so new chunks generate with Tellus Plus.
 
 **1:1 world note:** A true 1:1 world must be created with this mod's world creation screen. The vertical range is written into `level.dat` and validated on load, so an existing world cannot be converted to 1:1 after the fact. Expect world creation to take several minutes.
-
-
 ## Features
 
 ### Terrain generation
