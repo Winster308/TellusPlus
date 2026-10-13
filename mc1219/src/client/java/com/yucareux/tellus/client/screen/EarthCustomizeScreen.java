@@ -1305,16 +1305,58 @@ public class EarthCustomizeScreen extends Screen {
       return minOffset <= maxOffset;
    }
 
+   /**
+    * Chooses the height offset that places the previewed terrain inside the world.
+    *
+    * <h2>2026-10-12: two hard-coded clamps were flattening the world downwards</h2>
+    * The original implementation clamped the feasible offset range to {@code [-2000, 128]} before taking its
+    * midpoint:
+    * <pre>
+    *   minOffset = max(MIN_WORLD_Y - minBase, -2000)
+    *   maxOffset = min(MAX_WORLD_Y - maxBase, 128)
+    *   result    = (minOffset + maxOffset) / 2
+    * </pre>
+    * Both clamps are arbitrary, and taking the midpoint of a range that has been distorted on both sides
+    * produces a meaningless answer. Reproduced for a Guangzhou-sized preview (0..100 m) at 1:1:
+    * <pre>
+    *   minBase = 0, maxBase = 100
+    *   minOffset = max(-11040 - 0, -2000)   = -2000
+    *   maxOffset = min( 21599 - 100,  128)  =   128
+    *   result    = (-2000 + 128) / 2        =  -936      <- matches the observed heightOffset = -936
+    * </pre>
+    * The world was therefore shifted 936 blocks downwards and Guangzhou Tower, 20 m above sea level, ended up
+    * at about Y -916 instead of Y 84.
+    *
+    * <h2>What it does instead</h2>
+    * The offset that means "sea level sits at the configured sea level" is the natural target, and it is
+    * exactly the world setting's own default of 64. So:
+    * <ol>
+    *   <li>If 64 lies inside the real feasible range {@code [MIN_WORLD_Y - minBase, MAX_WORLD_Y - maxBase]},
+    *       use it. The terrain is then placed the way the world preset intends, and the previewed region is
+    *       guaranteed to be inside the world because the range was computed from the preview's own extremes.</li>
+    *   <li>Otherwise clamp the requested offset into that range -- the terrain still has to fit.</li>
+    * </ol>
+    * The arbitrary {@code -2000} / {@code 128} bounds are gone; the real bounds already come from the world
+    * limits, which is the only constraint that actually matters.
+    */
    private static int findBestHeightOffset(EarthGeneratorSettings settings, TerrainPreview.PreviewInfo info, double worldScale) {
       int minBase = scaledSurfaceY(info.minElevationMeters(), worldScale, settings.terrestrialHeightScale(), settings.oceanicHeightScale(), 0);
       int maxBase = scaledSurfaceY(info.maxElevationMeters(), worldScale, settings.terrestrialHeightScale(), settings.oceanicHeightScale(), 0);
-      int minOffset = Math.max(EarthGeneratorSettings.MIN_WORLD_Y - minBase, -2000);
-      int maxOffset = Math.min(EarthGeneratorSettings.MAX_WORLD_Y - maxBase, 128);
+
+      // The real feasible range: the lowest previewed column must not fall below the world floor, and the
+      // highest must not rise above the world ceiling.
+      int minOffset = EarthGeneratorSettings.MIN_WORLD_Y - minBase;
+      int maxOffset = EarthGeneratorSettings.MAX_WORLD_Y - maxBase;
+
       if (minOffset > maxOffset) {
-         return Mth.clamp(settings.heightOffset(), -2000, 128);
-      } else {
-         return Mth.clamp((int)Math.round((minOffset + maxOffset) * 0.5), minOffset, maxOffset);
+         // The previewed span does not fit in this world at all; keep whatever the user already had rather
+         // than inventing a value, and let the range check elsewhere report it.
+         return settings.heightOffset();
       }
+
+      // Prefer sea level at the configured sea level (the world preset's own default of 64) when it fits.
+      int preferred = settings.heightOffset();
+      return Mth.clamp(preferred, minOffset, maxOffset);
    }
 
    private static int scaledSurfaceY(double elevation, double worldScale, double terrestrialScale, double oceanicScale, int heightOffset) {

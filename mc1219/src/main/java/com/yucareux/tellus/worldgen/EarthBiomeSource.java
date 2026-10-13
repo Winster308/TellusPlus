@@ -161,11 +161,40 @@ public final class EarthBiomeSource extends BiomeSource {
       if (this.fastSpawnMode) {
          return this.resolveFastSpawnSurfaceBiome(blockX, blockZ);
       } else {
-         int rawCoverClass = LAND_COVER_SOURCE.sampleCoverClass(blockX, blockZ, this.settings.worldScale());
-         int visualCoverClass = this.sampleVisualCoverClass(blockX, blockZ, rawCoverClass);
-         WaterSurfaceResolver.WaterColumnData column = this.settings.enableWater()
-            ? this.waterResolver.resolveFastColumnData(blockX, blockZ, rawCoverClass)
-            : this.waterResolver.resolveColumnData(blockX, blockZ, rawCoverClass);
+         // 2026-10-12: LocalOnly. This is the path every ordinary chunk goes through -- it is reached from
+         // EarthChunkGenerator.isFrozenPeaksChunk via getNoiseBiome, i.e. from inside the chunk-generation
+         // pipeline. The network-capable variants here blocked the worker thread on a land-cover download and
+         // stalled the whole pipeline behind it. Measured (thread dump, 1:1 world, client log):
+         //   "c2me-worker-0" WAITING on SettableFuture
+         //     at LocalCache.waitForLoadingValue
+         //     at TellusLandCoverSource.getTile(:815)
+         //     at TellusLandCoverSource.sampleCoverClassAtLonLat(:355)
+         //     at TellusLandCoverSource.sampleCoverClass(:279)
+         //     at EarthBiomeSource.resolveBiomeAtBlock(:164)     <- here
+         //   "c2me-worker-1" TIMED_WAITING on FutureTask
+         //     at TellusDownloadExecutor.await(:426)             <- and here, on the network
+         //   "Server thread" TIMED_WAITING
+         //     at ServerChunkCache.getChunkBlocking(:2824)       <- waiting for those chunks
+         // The visible symptom is a world that only ever shows the solid-rock pass (deepslate with nothing
+         // above it) while the server tick climbs 40s -> 80s -> 123s.
+         //
+         // The `*LocalOnly` variants read the in-memory/on-disk cache and return the class default on a miss;
+         // they never submit a download, so this path cannot block no matter how busy the pool is. This matches
+         // what the spawn path a few dozen lines below already does (see the note above line 209), and what
+         // the water path now does too. Precision is unaffected once the tiles are cached: the same data is
+         // returned, it is simply never *fetched* from inside chunk generation.
+         int rawCoverClass = LAND_COVER_SOURCE.sampleCoverClassLocalOnly(
+            blockX, blockZ, this.settings.worldScale(), this.settings.worldScale());
+         int visualCoverClass = this.sampleVisualCoverClassLocalOnly(blockX, blockZ, rawCoverClass);
+         // 2026-10-11: this used to be
+         //   enableWater() ? resolveFastColumnData(...) : resolveColumnData(...)
+         // which sent the *water-disabled* case down the heavier path. resolveColumnData is the full builder
+         // (resolveRegionData -> buildRegionData: a whole grid around the column, blocking on the shared download
+         // pool for every uncached cell); resolveFastColumnData is the cheap one. Turning water off therefore made
+         // terrain generation slower rather than faster, and on a 1:1 world it stalled the chunk worker outright
+         // -- the player saw deepslate with nothing above it. The branches were the wrong way round. Both now take
+         // the cheap path; the exact result is still reached through the cached-region branch once a region exists.
+         WaterSurfaceResolver.WaterColumnData column = this.waterResolver.resolveFastColumnData(blockX, blockZ, rawCoverClass);
          Holder<Biome> surfaceBiome = this.resolveSurfaceBiomeAtBlock(blockX, blockZ, rawCoverClass, visualCoverClass, column, null);
          if (!this.settings.caveGeneration()) {
             return surfaceBiome;

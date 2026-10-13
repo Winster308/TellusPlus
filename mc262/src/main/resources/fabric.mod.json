@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "id": "tellusplus",
+  "version": "${version}",
+  "name": "Tellus Plus",
+  "description": "Tellus Plus recreates real-world terrain in Minecraft by generating Earth-scale landscapes from geographic data, with optimized data-source access for players in China. Trilingual: every player-facing string has English, Simplified Chinese and Spanish (en_us / zh_cn / es_es) variants.",
+  "authors": [
+    "BlackHoleEra-Team",
+    "Yucareux (Original Author)"
+  ],
+  "contact": {
+    "homepage": "https://github.com/Winster308/TellusPlus",
+    "sources": "https://github.com/Winster308/TellusPlus",
+    "issues": "https://github.com/Winster308/TellusPlus/issues"
+  },
+  "license": "LGPL-3.0-only",
+  "icon": "assets/tellusplus/icon.png",
+  "environment": "*",
+  "entrypoints": {
+    "main": [
+      "com.yucareux.tellus.Tellus"
+    ],
+    "client": [
+      "com.yucareux.tellus.TellusClient"
+    ],
+    "modmenu": [
+      "com.yucareux.tellus.config.TellusModMenu"
+    ],
+    "preLaunch": [
+      "com.yucareux.tellus.TellusPreLaunch"
+    ]
+  },
+  "mixins": [
+    "tellus.mixins.json",
+    {
+      "config": "tellus.client.mixins.json",
+      "environment": "client"
+    }
+  ],
+  "depends": {
+    "fabricloader": ">=0.19.5",
+    "minecraft": "~26.2",
+    "java": ">=25",
+    "fabric-api": "*"
+  },
+  "suggests": {
+    "distanthorizons": "*"
+  },
+  "recommends": {
+    "modmenu": ">=20.0.0"
+  }
+}

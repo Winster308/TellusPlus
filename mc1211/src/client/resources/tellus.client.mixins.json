@@ -1,0 +1,16 @@
+{
+  "required": true,
+  "package": "com.yucareux.tellus.mixin.client",
+  "compatibilityLevel": "JAVA_21",
+  "client": [
+    "LevelLoadingScreenMixin",
+    "MinecraftScreenMixin",
+    "PresetEditorMixin",
+    "VoxyRenderDistanceTrackerMixin",
+    "VoxyNodeManagerWarnThrottleMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  },
+  "mixins": []
+}

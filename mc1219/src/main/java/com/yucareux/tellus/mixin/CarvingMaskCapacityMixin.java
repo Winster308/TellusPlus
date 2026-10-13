@@ -1,5 +1,6 @@
 package com.yucareux.tellus.mixin;
 
+import com.yucareux.tellus.worldgen.TellusCarvingMaskCapacity;
 import com.yucareux.tellus.worldgen.TellusLayout;
 import net.minecraft.world.level.chunk.CarvingMask;
 import org.spongepowered.asm.mixin.Mixin;
@@ -66,28 +67,6 @@ import org.spongepowered.asm.mixin.injection.ModifyArg;
 @Mixin(CarvingMask.class)
 public abstract class CarvingMaskCapacityMixin {
 
-   /** 256 bit per section (16^3 blocks, 1 bit each). */
-   private static final int BITS_PER_SECTION = 256;
-
-   /**
-    * 2026-10-05: the top of the carving noise window, measured as the ceiling
-    * {@code TellusNoiseSettingsAdapter} enforces ({@code noiseMinY + noiseHeight <= 2032}). Nothing can be
-    * carved above it, whatever the world height and whatever the sea level is.
-    */
-   private static final int NOISE_WINDOW_TOP_Y = 2032;
-
-   /** The configured window height, same property (and same default) as the adapter reads. */
-   private static final int CONFIGURED_NOISE_HEIGHT =
-      Math.max(16, Integer.getInteger("tellus.caves.noiseHeight", 1024) / 16 * 16);
-
-   /** Sections from the real world bottom up to {@link #NOISE_WINDOW_TOP_Y} (254 with the default layout). */
-   private static final int LAYOUT_SECTIONS = (NOISE_WINDOW_TOP_Y - TellusLayout.WORLD_MIN_Y + 15) / 16;
-
-   /** Operator override, and never smaller than the configured noise window. */
-   private static final int MASK_SECTIONS = Math.max(
-      Integer.getInteger("tellus.caves.maskSections", LAYOUT_SECTIONS),
-      CONFIGURED_NOISE_HEIGHT / 16);
-
    @ModifyArg(
       method = "<init>(II)V",
       at = @At(value = "INVOKE", target = "Ljava/util/BitSet;<init>(I)V")
@@ -97,23 +76,17 @@ public abstract class CarvingMaskCapacityMixin {
       // Was `256 * 64`, which was derived from the vanilla minY = -64 and therefore left the whole carving band
       // outside the BitSet: caves were silently not carved at all.
       // 65,024 bit = 8 KB per chunk, against 16,793,600 bit = 2 MB uncapped (a 1/258 ratio).
-      return Math.min(nbits, BITS_PER_SECTION * MASK_SECTIONS);
-   }
-
-   /**
-    * The section count this mixin will actually allow, exposed so the startup self-check in
-    * {@code Tellus.probeCarvingMaskCapacity()} can compare against <b>the same expression</b>.
-    *
-    * <p>2026-10-11: the self-check previously hard-coded {@code 131072} (= {@code 256 * 512}). With the
-    * 1:1 world layout ({@code WORLD_MIN_Y = -11040}) {@link #MASK_SECTIONS} is <b>817</b>, so the real cap
-    * is {@code 256 * 817 = 209152} bit. {@code 209152 > 131072}, so the check logged
-    * <i>"NOT capped ... did not take effect"</i> while the mixin was in fact working exactly as designed --
-    * the warning was false and sent this investigation down the wrong path once.
-    *
-    * <p>A self-check that hard-codes the very number it is meant to verify will always rot when the layout
-    * changes; reading it from here is what keeps the two in step.
-    */
-   public static int expectedMaskSections() {
-      return MASK_SECTIONS;
+      //
+      // 2026-10-11: the capacity constants moved to TellusCarvingMaskCapacity. They used to live here, with a
+      // `public static int expectedMaskSections()` accessor so Tellus.probeCarvingMaskCapacity() could compare
+      // against the same expression. That accessor is illegal in a mixin -- the framework rejects any mixin
+      // carrying a non-private static method -- so the whole mixin was refused at runtime and the cap never
+      // applied. Verified in a live log:
+      //   InvalidMixinException: Mixin tellus.mixins.json:CarvingMaskCapacityMixin
+      //     contains non-private static method
+      //     at MixinApplicatorStandard.checkMethodVisibility
+      // Keeping the values in a plain class gives the self-check its single source of truth without asking the
+      // mixin to expose anything.
+      return Math.min(nbits, TellusCarvingMaskCapacity.expectedBits());
    }
 }

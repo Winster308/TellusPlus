@@ -1742,10 +1742,36 @@ public class Tellus implements ModInitializer {
       try {
          int chunkX = spawn.getX() >> 4;
          int chunkZ = spawn.getZ() >> 4;
-         net.minecraft.world.level.chunk.LevelChunk chunk = world.getChunkSource()
-            .getChunkNow(chunkX, chunkZ);
-         if (chunk == null) {
-            // Don't shout yet  ——  the spawn area is still being laid out ; give it about 60 seconds before reporting
+
+         // 2026-10-11: check the whole neighbourhood, not just the centre chunk.
+         //
+         // The player does not land on the spawn block. Vanilla's spawnRadius game rule (default 10) scatters
+         // them within +-10 blocks of it, which can be a *different* chunk, and the client also needs the
+         // surrounding chunks before it can decide where the ground is. Measured:
+         //   spawn    (322548, 356, -108250) -> chunk [20159, -6766]   (this one was generated)
+         //   logged in (322538.5, 350.0, -108258.5) -> chunk [20158, -6767]  <- diagonal neighbour, never requested
+         // The neighbour had no terrain, so the player fell, and was yanked back once it finally generated --
+         // which reads as "the mod is broken" rather than "the world is still loading".
+         int ready = 0;
+         int total = 0;
+         int firstMissingX = 0;
+         int firstMissingZ = 0;
+         boolean anyMissing = false;
+         for (int dx = -spawnReadyRadius; dx <= spawnReadyRadius; dx++) {
+            for (int dz = -spawnReadyRadius; dz <= spawnReadyRadius; dz++) {
+               total++;
+               if (world.getChunkSource().getChunkNow(chunkX + dx, chunkZ + dz) != null) {
+                  ready++;
+               } else if (!anyMissing) {
+                  anyMissing = true;
+                  firstMissingX = chunkX + dx;
+                  firstMissingZ = chunkZ + dz;
+               }
+            }
+         }
+
+         if (anyMissing) {
+            // Don't shout yet —— the spawn area is still being laid out ; give it about 60 seconds before reporting
             // (the counter goes up **only here** : tickSpawnChunkCheck used to bump it too , which meant two steps per tick ,
             //  so 60 seconds of patience were really only 30)
             if (spawnCheckTicks < SPAWN_CHECK_LIMIT_TICKS) {
@@ -1755,19 +1781,19 @@ public class Tellus implements ModInitializer {
             // Once it has reported, it is done : otherwise the next tick keeps asking about the same chunk, wasting one getChunkNow per tick
             spawnCheckWorld = null;
             spawnCheckPos = null;
-            LOGGER.warn("[TellusCN] the spawn chunk never generated - still missing after 60 seconds. Spawn {} sits in chunk [{}, {}] "
-               + "which cannot be fetched. If you see air blocks plus a bedrock border and no collision, this is the reason."
+            LOGGER.warn("[TellusCN] the spawn area never finished generating - {}/{} chunks around spawn {} are still missing after 60 seconds "
+               + "(first missing: chunk [{}, {}]). If you see air blocks plus a bedrock border and no collision, this is the reason."
                + "Common causes: the terrain height was computed before the DEM tiles finished downloading"
                + "(the critical path was culled too early), or terrain generation was skipped. Please paste this log." ,
-               spawn, chunkX, chunkZ);
+               total - ready, total, spawn, firstMissingX, firstMissingZ);
             return;
          }
          spawnCheckWorld = null;   // success  ->  stop retrying
          spawnCheckPos = null;
          int surface = world.getHeight(net.minecraft.world.level.levelgen.Heightmap.Types.WORLD_SURFACE,
             spawn.getX(), spawn.getZ());
-         LOGGER.info("[TellusCN] spawn check passed: chunk [{}, {}] generated, spawn {}, surface Y={}",
-            chunkX, chunkZ, spawn, surface);
+         LOGGER.info("[TellusCN] spawn check passed: {} chunks around [{}, {}] generated, spawn {}, surface Y={}",
+            total, chunkX, chunkZ, spawn, surface);
       } catch (Throwable t) {
          if (LOGGER.isDebugEnabled()) {
             LOGGER.debug("[TellusCN] spawn check errored (harmless): {}", t.toString());
@@ -1793,10 +1819,80 @@ public class Tellus implements ModInitializer {
    /** How many ticks the spawn self-check waits at the most (1200 ≈ 60 seconds) . */
    private static final int SPAWN_CHECK_LIMIT_TICKS = 1200;
 
+   /**
+    * Chunk radius around the spawn point that is generated before the player is let in.
+    *
+    * <p>Radius 2 is a 5x5 area (25 chunks). It covers vanilla's spawnRadius scatter (default 10 blocks, which
+    * can land the player in a diagonally adjacent chunk) plus one ring for the client's own ground detection.
+    * 0 restores the old single-chunk behaviour. {@code -Dtellus.spawn.readyRadius=N} pins it explicitly.
+    *
+    * <h2>Why the radius is not a constant any more</h2>
+    * The amount of data the client has to receive before it can stand on solid ground scales with the world
+    * height, and at 1:1 that is enormous. Light data alone is 2 layers x 2048 B per 16-block section:
+    * <pre>
+    *   scale   height   sections   light per chunk   25 chunks
+    *   30:1       816         51          0.20 MB      5.0 MB
+    *   50:1       544         34          0.13 MB      3.3 MB
+    *    1:1     19008       1188          4.64 MB    116.0 MB
+    * </pre>
+    * A fixed radius of 2 therefore asks the client to pull ~116 MB at 1:1, which it cannot do inside its own
+    * timeout -- measured: "Timed out while waiting for the client to load chunks, letting the player into the
+    * world anyway", followed by the player falling. The radius is now chosen from the section count so the
+    * client is never handed more than a bounded amount of terrain: tall worlds get a tighter ring, which still
+    * covers the spawn scatter, and ordinary worlds keep the full 5x5.
+    */
+   private static final int SPAWN_READY_RADIUS_CAP = 2;
+
+   /**
+    * The radius actually used for this world, decided once when the spawn check starts from the level's real
+    * height. Stored rather than recomputed so the request and the check cannot disagree -- if they did, the
+    * check would wait forever for chunks that were never asked for.
+    */
+   private static volatile int spawnReadyRadius = SPAWN_READY_RADIUS_CAP;
+
+   /**
+    * How many chunks around the spawn point are generated before the player is let in.
+    *
+    * <h2>2026-10-13: the floor is 1, not 0</h2>
+    * The first version returned 0 for very tall worlds, meaning "generate only the chunk the spawn block is
+    * in". That is not enough, for a reason that has nothing to do with height: vanilla's {@code spawnRadius}
+    * game rule (default 10) scatters the player within +-10 blocks of the spawn, which can land them in a
+    * <b>diagonally adjacent</b> chunk. Measured:
+    * <pre>
+    *   spawn block  (12614591, -935, -2645201)  -> chunk [788411, -165326]
+    *   logged in at (12614586.5, -938.0, ...)   -> adjacent chunk, never requested
+    * </pre>
+    * The player then stood on nothing and fell. Radius 1 (3x3) is the smallest value that covers the scatter,
+    * so it is now the floor.
+    *
+    * <p>Above that the radius still shrinks with world height, because a tall world's chunks are
+    * proportionally more expensive to send: at 1:1 one chunk is 1188 sections and about 4.9 MB of light data
+    * alone, so 3x3 is already ~44 MB and anything larger will not finish before the client's own timeout.
+    *
+    * <p>{@code -Dtellus.spawn.readyRadius=N} pins it explicitly (0-8).
+    */
+   private static int resolveSpawnReadyRadius(net.minecraft.server.level.ServerLevel world) {
+      Integer explicit = Integer.getInteger("tellus.spawn.readyRadius");
+      if (explicit != null) {
+         return Math.max(0, Math.min(8, explicit));
+      }
+      try {
+         int sections = world.dimensionType().height() / 16;
+         if (sections <= 64) {
+            return 2;      // vanilla-ish heights: 5x5 costs about 5 MB
+         }
+         return 1;         // everything taller: 3x3, the minimum that covers the spawn scatter
+      } catch (Throwable t) {
+         return 1;         // never let a probe failure break world entry
+      }
+   }
+
    private static void beginSpawnChunkCheck(net.minecraft.server.level.ServerLevel world, BlockPos spawn) {
       spawnCheckWorld = world;
       spawnCheckPos = spawn;
       spawnCheckTicks = 0;
+      // Decide the radius once, from this world's real height, so the request and the check below agree.
+      spawnReadyRadius = resolveSpawnReadyRadius(world);
       requestSpawnChunk(world, spawn);          // proactively pull the spawn chunk up (async, does not block the main thread )
       checkSpawnChunkGenerated(world, spawn);   // try once right away first (most of the time it is already there by then )
    }
@@ -1831,14 +1927,34 @@ public class Tellus implements ModInitializer {
       try {
          int chunkX = spawn.getX() >> 4;
          int chunkZ = spawn.getZ() >> 4;
-         world.getChunkSource()
-            .getChunkFuture(chunkX, chunkZ, net.minecraft.world.level.chunk.status.ChunkStatus.FULL, true)
-            .whenComplete((result, error) -> {
-               if (error != null) {
-                  LOGGER.warn("[TellusCN] cannot request the spawn chunk [{}, {}]: {}",
-                     chunkX, chunkZ, error.toString());
-               }
-            });
+         // 2026-10-11: request the whole neighbourhood, not one chunk.
+         //
+         // One chunk is not enough for two separate reasons, both measured:
+         //   - vanilla's spawnRadius (default 10) can place the player in a *diagonally adjacent* chunk;
+         //     observed spawn chunk [20159, -6766] versus the player's [20158, -6767].
+         //   - the client needs the chunks around the player before it can work out where the ground is, and
+         //     if they are missing it drops the player and pulls them back once they arrive.
+         // Requesting the ring asynchronously keeps the server thread free; nothing here blocks.
+         int requested = 0;
+         for (int dx = -spawnReadyRadius; dx <= spawnReadyRadius; dx++) {
+            for (int dz = -spawnReadyRadius; dz <= spawnReadyRadius; dz++) {
+               final int cx = chunkX + dx;
+               final int cz = chunkZ + dz;
+               world.getChunkSource()
+                  .getChunkFuture(cx, cz, net.minecraft.world.level.chunk.status.ChunkStatus.FULL, true)
+                  .whenComplete((result, error) -> {
+                     if (error != null) {
+                        LOGGER.warn("[TellusCN] cannot request the spawn chunk [{}, {}]: {}",
+                           cx, cz, error.toString());
+                     }
+                  });
+               requested++;
+            }
+         }
+         if (spawnReadyRadius > 0) {
+            LOGGER.info("[TellusCN] requested {} spawn-area chunks ({} chunk radius around [{}, {}]) so the player does not land in unloaded terrain",
+               requested, spawnReadyRadius, chunkX, chunkZ);
+         }
       } catch (Throwable t) {
          if (LOGGER.isDebugEnabled()) {
             LOGGER.debug("[TellusCN] spawn chunk request errored (harmless): {}", t.toString());
@@ -1915,12 +2031,31 @@ public class Tellus implements ModInitializer {
       }
       String perTick = System.getProperty("tellus.voxy.chunksPerTick");
       if (perTick != null) {
-         try {
-            int value = Integer.parseInt(perTick.trim());
+         String trimmed = perTick.trim();
+         if (trimmed.equalsIgnoreCase("auto")) {
+            // 2026-10-11: "auto" sizes the per-tick Voxy pre-generation quota from the CPU.
+            //
+            // The fixed author default is 4, which leaves a multi-core machine idle: pre-generation is what
+            // fills Voxy's far LOD, and at 4 chunks per tick it takes a very long time to cover a view distance.
+            // The quota is not the real safety valve anyway -- TellusVoxyPregenManager.effectiveLaunchBudget
+            // already throttles per tick by measured tick time (halves at 50 ms, drops to 1 at 55 ms, stops at
+            // 70 ms), so asking for more only matters while the server is comfortably ahead.
+            //
+            // About one chunk per core, floored at 4 (the old default, so a small machine is no worse off) and
+            // capped at 32. -Dtellus.voxy.chunksPerTick=N still pins an exact number.
+            int cores = Runtime.getRuntime().availableProcessors();
+            int value = Math.max(4, Math.min(32, cores));
             voxyPregen().setChunksPerTickOverride(value);
-            LOGGER.info("[TellusCN] Voxy chunks per tick overridden to {} (-Dtellus.voxy.chunksPerTick)", value);
-         } catch (NumberFormatException e) {
-            LOGGER.warn("[TellusCN] -Dtellus.voxy.chunksPerTick is not an integer: {}", perTick);
+            LOGGER.info("[TellusCN] Voxy chunks per tick set to auto -> {} on this {}-core machine "
+               + "(floor 4, cap 32; tick-time throttling still applies on top)", value, cores);
+         } else {
+            try {
+               int value = Integer.parseInt(trimmed);
+               voxyPregen().setChunksPerTickOverride(value);
+               LOGGER.info("[TellusCN] Voxy chunks per tick overridden to {} (-Dtellus.voxy.chunksPerTick)", value);
+            } catch (NumberFormatException e) {
+               LOGGER.warn("[TellusCN] -Dtellus.voxy.chunksPerTick is neither an integer nor \"auto\": {}", perTick);
+            }
          }
       }
       LOGGER.info("[TellusCN] Voxy pre-generation overrides: enabled={} radius={} chunksPerTick={} (null = use the world setting)",
@@ -1930,7 +2065,7 @@ public class Tellus implements ModInitializer {
 
    /**
     * Self-check: whether the initial BitSet capacity of {@code CarvingMask} really is capped by
-    * {@code CarvingMaskCapacityMixin} .
+    * {@code TellusCarvingMaskCapacity} .
     *
     * <p>No "it should be working" assumption : build a 65600-high mask directly , then read its BitSet capacity by reflection .
     * Uncapped it is 16,793,600 bit ≈ 2 MB ; capped it is 65,536 bit = 8 KB .
@@ -1963,7 +2098,7 @@ public class Tellus implements ModInitializer {
          // designed -- the warning was false, and it sent this investigation down the wrong path once.
          // It now asks the mixin for the value instead of re-deriving (or worse, guessing) it, so the two
          // cannot drift apart when the layout changes.
-         int expectedCap = 256 * com.yucareux.tellus.mixin.CarvingMaskCapacityMixin.expectedMaskSections();
+         int expectedCap = com.yucareux.tellus.worldgen.TellusCarvingMaskCapacity.expectedBits();
          if (allotted <= expectedCap) {
             LOGGER.info("[TellusCN] CarvingMask initial capacity is capped: {} bit about {} KB, {}x below the uncapped 16,793,600 bit (about 2 MB)",
                allotted, allotted / 8 / 1024, 16_793_600 / Math.max(1, allotted));

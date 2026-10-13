@@ -22,6 +22,8 @@
     "ChunkPacketCapMixin",
     "HighestSectionHintMixin",
     "CarvingMaskCapacityMixin",
+    "PlayerSpawnFinderMixin",
+    "VoxyNodeCapacityMixin",
     "VoxyMapperGuardMixin",
     "voxy.VoxyServerTickMixin",
     "LightMissingLayerGuardMixin",

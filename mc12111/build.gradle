@@ -1,0 +1,161 @@
+plugins {
+	id 'fabric-loom' version '1.17.20'
+	id 'maven-publish'
+}
+
+// ---------------------------------------------------------------------------
+// Target: Minecraft 1.21.11 (Fabric).
+// Values below were resolved from https://maven.fabricmc.net maven-metadata.xml
+// (2026-10 round): fabric-loader latest = 0.19.5, fabric-api for 1.21.11 exists
+// from 0.135.1+1.21.11. Loom 1.17.20 already produces the 1.21.11 layered
+// mappings cache (caches/fabric-loom/1.21.11), so it is reused here.
+// ---------------------------------------------------------------------------
+def minecraftVersion = '1.21.11'
+def loaderVersion = '0.19.5'
+def fabricVersion = '0.141.6+1.21.11'
+def modmenuVersion = '16.0.1'
+def distantHorizonsApiVersion = '6.1.0'
+def javaVersion = 21
+def distantHorizonsRuntimePath = providers.gradleProperty('mc12111_distant_horizons_runtime_path').orNull
+
+// Resolved from the root project when built as a subproject, with a local
+// fallback so the module can also be built from a standalone verification root.
+def tellusArchivesBaseName = (rootProject.findProperty('archives_base_name') ?: 'TellusCN').toString()
+def tellusModVersion = (rootProject.findProperty('mod_version') ?: '1.0.0').toString()
+
+base {
+	archivesName = "${tellusArchivesBaseName}-${minecraftVersion}-${tellusModVersion}"
+}
+
+configurations {
+	bundledLibrary
+}
+
+tasks.withType(AbstractArchiveTask).configureEach {
+	archiveVersion.set('')
+}
+
+repositories {
+	mavenCentral()
+	maven {
+		url = 'https://api.modrinth.com/maven/'
+		content {
+			includeGroup 'maven.modrinth'
+		}
+	}
+}
+
+loom {
+	splitEnvironmentSourceSets()
+
+	mods {
+		tellus {
+			sourceSet sourceSets.main
+			sourceSet sourceSets.client
+		}
+	}
+}
+
+sourceSets {
+	main {
+		java {
+			setSrcDirs([rootProject.file('src/main/java'), project.file('src/main/java')])
+		}
+		resources {
+			setSrcDirs([rootProject.file('src/main/resources'), project.file('src/main/resources')])
+		}
+	}
+	client {
+		java.setSrcDirs([project.file('src/client/java')])
+		resources.setSrcDirs([project.file('src/client/resources')])
+	}
+	test {
+		java.setSrcDirs([rootProject.file('src/test/java'), project.file('src/test/java')])
+		resources.setSrcDirs([rootProject.file('src/test/resources'), project.file('src/test/resources')])
+	}
+}
+
+dependencies {
+	minecraft "com.mojang:minecraft:${minecraftVersion}"
+	mappings loom.officialMojangMappings()
+	modImplementation "net.fabricmc:fabric-loader:${loaderVersion}"
+	modImplementation "net.fabricmc.fabric-api:fabric-api:${fabricVersion}"
+
+	bundledLibrary 'org.tukaani:xz:1.10'
+	implementation 'org.tukaani:xz:1.10'
+	implementation 'io.github.sebasbaumh:mapbox-vector-tile-java:24.1.1'
+	include 'io.github.sebasbaumh:mapbox-vector-tile-java:24.1.1'
+	implementation 'com.google.protobuf:protobuf-java:4.28.2'
+	include 'com.google.protobuf:protobuf-java:4.28.2'
+
+	// Map tiles are WebP; the ImageIO plugin from TwelveMonkeys decodes them
+	// (pulls common-*/imageio-core transitively).
+	bundledLibrary 'com.twelvemonkeys.imageio:imageio-webp:3.12.0'
+	implementation 'com.twelvemonkeys.imageio:imageio-webp:3.12.0'
+
+	testImplementation 'org.junit.jupiter:junit-jupiter:5.10.2'
+	testRuntimeOnly 'org.junit.jupiter:junit-jupiter-engine:5.10.2'
+	testRuntimeOnly 'org.junit.platform:junit-platform-launcher:1.10.2'
+
+	compileOnly "maven.modrinth:DistantHorizonsApi:${distantHorizonsApiVersion}"
+	modCompileOnly "maven.modrinth:modmenu:${modmenuVersion}"
+	if (distantHorizonsRuntimePath) {
+		runtimeOnly files(distantHorizonsRuntimePath)
+	}
+}
+
+processResources {
+	inputs.property 'version', project.version
+
+	filesMatching('fabric.mod.json') {
+		expand version: inputs.properties.version
+	}
+}
+
+tasks.withType(JavaCompile).configureEach {
+	options.release = javaVersion
+}
+
+tasks.named('test').configure {
+	useJUnitPlatform()
+}
+
+java {
+	toolchain {
+		languageVersion = JavaLanguageVersion.of(javaVersion)
+	}
+
+	withSourcesJar()
+
+	sourceCompatibility = JavaVersion.toVersion(javaVersion)
+	targetCompatibility = JavaVersion.toVersion(javaVersion)
+}
+
+jar {
+	inputs.property 'archivesName', project.base.archivesName
+
+	from({
+		configurations.bundledLibrary.collect { zipTree(it) }
+	}) {
+		exclude 'META-INF/MANIFEST.MF'
+	}
+
+	def licenseFile = rootProject.file('LICENSE')
+	if (licenseFile.exists()) {
+		from(licenseFile) {
+			rename { "${it}_${inputs.properties.archivesName}" }
+		}
+	}
+}
+
+publishing {
+	publications {
+		create('mavenJava', MavenPublication) {
+			artifactId = project.base.archivesName.get()
+			from components.java
+		}
+	}
+
+	repositories {
+	}
+}
